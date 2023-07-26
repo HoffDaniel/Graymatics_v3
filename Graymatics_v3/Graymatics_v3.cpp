@@ -1,4 +1,6 @@
-// Graymatics_v3.cpp
+//////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////// Graymatics_v3.cpp /////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
 
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/core.hpp>
@@ -7,7 +9,22 @@
 #include <opencv2/videoio.hpp>
 
 #include <iostream>
+#include <numeric>
 
+//////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////// FUNCTION DECLARATIONS /////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
+
+//IoU = Area of Intersection / Area of Union
+float iou(const cv::Rect& a, const cv::Rect& b);
+
+//Non-Maximum Supression (NSM)
+std::vector<int> nms(const std::vector<cv::Rect>& boxes, const std::vector<float>& scores, float iou_threshold);
+
+
+//////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////// MAIN /////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
 int main()
 {
     std::cout << "Running!\n";
@@ -18,9 +35,9 @@ int main()
     int64_t num_InputElements = num_Channels * input_size * input_size;
     int64_t num_Classes = 80; //Yolov5 pre-build have 80  
 
-    float threshold_Score = 0.5;
-    float threshold_NMS = 0.45;
-    float threshold_Confidence = 0.045;
+    
+    float threshold_NMS = 0.45; //IoU threshold for NSM
+    float threshold_Confidence = 0.045; //or float threshold_Score = 0.5;
 
 
     // Set up ONNX runtime
@@ -157,35 +174,20 @@ int main()
             }
         }
 
-        //// Iterate over all boxes for the first frame in the batch (in our context there is only one frame
-        //for (int box_index = 0; box_index < output_boxes[0].size(); ++box_index) {
-        //    //Get objectness score/confidence
-        //    float objectness_Score = output_boxes[0][box_index][4]; 
-        //    //Get class probabilities
-        //    std::vector<float> class_scores(output_boxes[0][box_index].begin() + 5, output_boxes[0][box_index].end());
-        //    //Get index of class with the highest score
-        //    int class_index = std::distance(class_scores.begin(), std::max_element(class_scores.begin(), class_scores.end()));
-        //    //Get max class score
-        //    float max_class_score = *std::max_element(class_scores.begin(), class_scores.end());
-        //    if (objectness_Score > threshold_Confidence) { 
-        //        std::cout << "!!! Detected class " << labels[class_index] << " with score " << objectness_Score << "\n";
-        //    }
-        //    //else {
-        //    //    //If objectness score is below threshold, just print max class score
-        //    //    std::cout << "--- Max class score: " << max_class_score << " for class " << labels[class_index] << "\n";
-        //    //}
-        //}
-
 
         //Drawing the bounding boxes and creating new video with them
         //SCaling the bounding box coordinates from the resized image to the original image
         //float scale = static_cast<float>(frame_height) / input_size;
         //
+        std::vector<std::pair<cv::Rect, int>> bounding_boxes;
+        std::vector<float> bounding_box_scores;
+
         for (int box_index = 0; box_index < output_boxes[0].size(); ++box_index) {
 
             //Get objectness score/confidence
             float objectness_Score = output_boxes[0][box_index][4];
 
+            
             if (objectness_Score > threshold_Confidence) {
                 //Get class probabilities
                 std::vector<float> class_scores(output_boxes[0][box_index].begin() + 5, output_boxes[0][box_index].end());
@@ -206,11 +208,35 @@ int main()
                 int x = x_center - box_width / 2;
                 int y = y_center - box_height / 2;
 
+                // Add bounding box to list
+                bounding_boxes.emplace_back(cv::Rect(x, y, box_width, box_height), class_index);
+                bounding_box_scores.push_back(objectness_Score);
+
                 //Draw bounding box and label on the frame
-                cv::rectangle(resized_frame, cv::Point(x, y), cv::Point(x + box_width, y + box_height), cv::Scalar(0, 255, 0), 2);
-                cv::putText(resized_frame, labels[class_index], cv::Point(x, y - 10), cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(0, 255, 0), 2);
+                //cv::rectangle(resized_frame, cv::Point(x, y), cv::Point(x + box_width, y + box_height), cv::Scalar(0, 255, 0), 2);
+                //cv::putText(resized_frame, labels[class_index], cv::Point(x, y - 10), cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(0, 255, 0), 2);
             }
         }
+
+        //Just to make it a bit more readable and not need to change nms function
+        std::vector<cv::Rect> bounding_Rect;
+        std::vector<int> class_Indexes;
+        for (int i = 0; i < bounding_boxes.size(); i++) {
+            bounding_Rect.push_back(bounding_boxes[i].first);
+            class_Indexes.push_back(bounding_boxes[i].second);
+        }
+
+        // Get kept indices after applying NMS
+        std::vector<int> indices_kept = nms(bounding_Rect, bounding_box_scores, threshold_NMS);
+
+        // Use only bounding boxes that passed non-maximum suppression
+        for (auto i : indices_kept) {
+            cv::Rect& box = bounding_boxes[i].first;
+            //Draw bounding box and label on the frame
+            cv::rectangle(resized_frame, cv::Point(box.x, box.y), cv::Point(box.x + box.width, box.y + box.height), cv::Scalar(0, 255, 0), 2);
+            cv::putText(resized_frame, labels[class_Indexes[i]], cv::Point(box.x, box.y - 10), cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(0, 255, 0), 2);
+        }
+
 
         //Add frame to video object
         output_video.write(resized_frame);
@@ -231,3 +257,37 @@ int main()
 }
 
 
+//////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////// FUNCTION DEFINITION /////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
+
+float iou(const cv::Rect& a, const cv::Rect& b) {
+    cv::Rect intersect = a & b;
+    return intersect.area() / float(a.area() + b.area() - intersect.area());
+}
+
+std::vector<int> nms(const std::vector<cv::Rect>& boxes, const std::vector<float>& scores, float nsm_threshold) {
+    std::vector<int> indices(boxes.size()); //Containes "indices" of all bounding boxes
+    std::iota(indices.begin(), indices.end(), 0); //fill with indices in increasing values , could use something else
+    std::sort(indices.begin(), indices.end(), [&scores](int a, int b) { return scores[a] > scores[b]; }); //sort with a custom comparison function, i.e. "order the indices such that the corresponding scores are in descending order"
+
+    std::vector<int> keep;
+    while (!indices.empty()) {
+        int i = indices[0]; //the highest score
+        keep.push_back(i); //keep it
+
+        std::vector<float> ious;
+        for (int idx : indices) {
+            ious.push_back(iou(boxes[i], boxes[idx])); //Use IoU ==> IoU = Area of Intersection / Area of Union
+        }
+
+        std::vector<int> new_indices;
+        for (int j = 0; j < indices.size(); ++j) {
+            if (ious[j] <= nsm_threshold) {
+                new_indices.push_back(indices[j]);
+            }
+        }
+        indices = new_indices;
+    }
+    return keep;
+}
